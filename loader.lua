@@ -1998,3 +1998,1004 @@ local function stopMachineAnimations(fadeTime)
     for _, bundle in pairs(machineVisuals.tracks) do
         for _, animationTrack in pairs(bundle) do
             if animationTrack and animationTrack.IsPlaying then
+                pcall(animationTrack.Stop, animationTrack, fadeTime or 0.1)
+            end
+        end
+    end
+    machineVisuals.activeType = nil
+    machineVisuals.activeMachine = nil
+end
+
+
+local function destroyMachineAnimationTracks()
+    stopMachineAnimations(0)
+    for _, bundle in pairs(machineVisuals.tracks) do
+        for _, animationTrack in pairs(bundle) do
+            if animationTrack then
+                pcall(animationTrack.Destroy, animationTrack)
+            end
+        end
+    end
+    machineVisuals.tracks = {}
+    machineVisuals.humanoid = nil
+end
+
+
+local function getMachineAnimationBundle(machine)
+    local humanoid = getHumanoid()
+    if not humanoid then return nil, nil end
+    if machineVisuals.humanoid ~= humanoid then
+        destroyMachineAnimationTracks()
+        machineVisuals.humanoid = humanoid
+    end
+    local machineType = machine and machine:FindFirstChild("machineType")
+    local typeName = machineType and tostring(machineType.Value) or nil
+    if not typeName then return nil, nil end
+    local bundle = machineVisuals.tracks[typeName]
+    if bundle then return bundle, typeName end
+    local machines = ReplicatedStorage.shared.assets.animations.gameAnims.Machines
+    local folder = machines:FindFirstChild(typeName)
+    local animator = humanoid:FindFirstChildOfClass("Animator")
+    if not folder or not animator then return nil, typeName end
+    bundle = {
+        idle = animator:LoadAnimation(folder.idle),
+        rep = animator:LoadAnimation(folder.rep),
+    }
+    bundle.idle.Looped = true
+    bundle.rep.Looped = false
+    machineVisuals.tracks[typeName] = bundle
+    return bundle, typeName
+end
+
+
+local function playMachineIdle(machine)
+    local bundle, machineType = getMachineAnimationBundle(machine)
+    if not bundle or not bundle.idle then return false end
+    if machineVisuals.activeType ~= machineType then
+        stopMachineAnimations(0.08)
+    end
+    machineVisuals.activeType = machineType
+    machineVisuals.activeMachine = machine
+    if not bundle.idle.IsPlaying then
+        pcall(bundle.idle.Play, bundle.idle, 0.1, 1, 1)
+    end
+    return bundle.idle.IsPlaying
+end
+
+
+local function playMachineRep(machine, speedOverride)
+    local bundle = getMachineAnimationBundle(machine)
+    if not bundle or not bundle.rep then return false end
+    local speed = tonumber(speedOverride)
+    if not speed then
+        speed = 1
+        local owned = LP:FindFirstChild("ownedGamepasses")
+        if owned and owned:FindFirstChild("x2 Rep Time") then
+            speed = 2
+        end
+    end
+    speed = math.clamp(speed, 0.25, 8)
+    pcall(bundle.rep.Play, bundle.rep, 0.04, 1, speed)
+    pcall(bundle.rep.AdjustSpeed, bundle.rep, speed)
+    return bundle.rep.IsPlaying
+end
+
+machineVisuals.stopAnimations = stopMachineAnimations
+machineVisuals.destroyTracks = destroyMachineAnimationTracks
+machineVisuals.playIdle = playMachineIdle
+machineVisuals.playRep = playMachineRep
+end
+addCleanup(function()
+    FastFarm.MachineVisuals.destroyTracks()
+end)
+
+
+local function machineIsActive(machine, seat, humanoid)
+    if not machine or not seat then
+        return false
+    end
+    if humanoid and humanoid.SeatPart == seat then
+        return true
+    end
+    local machineInUse = LP:FindFirstChild("machineInUse")
+    if machineInUse and machineInUse.Value == seat then
+        return true
+    end
+    if tonumber(machine:GetAttribute("InUseUserId")) == LP.UserId then
+        return true
+    end
+    local character = getCharacter()
+    local standingMount = character and character:GetAttribute("MachineStandingMount") == true
+    local scaleFrozen = character and character:GetAttribute("MachineScaleFrozen") == true
+    return (standingMount or scaleFrozen)
+        and FastFarm.acceptedMachine == machine
+        and FastFarm.acceptedMachineSeat == seat
+end
+
+
+local function getMachineParts(definition)
+    local folder = workspace:FindFirstChild("machinesFolder")
+    if not folder or type(definition) ~= "table" then
+        return nil, nil
+    end
+
+    local bestMachine, bestSeat, bestGain, bestRequirement, bestDistance = nil, nil, -math.huge, -1, math.huge
+    local currentHumanoid = getHumanoid()
+    local root = getRoot()
+    local referencePosition = root and root.Position or (definition.fallback and definition.fallback.Position)
+    local expectedPosition = definition.fallback and definition.fallback.Position
+    local candidates = definition.instance and { definition.instance } or folder:GetChildren()
+    for _, candidate in ipairs(candidates) do
+        if candidate:IsA("Model") and candidate.Name == definition.object then
+            local seat = candidate.PrimaryPart
+            if not (seat and seat:IsA("Seat")) then
+                seat = candidate:FindFirstChild("interactSeat", true)
+            end
+            local expectedDistance = seat and expectedPosition
+                and (Vector3.new(seat.Position.X, 0, seat.Position.Z)
+                    - Vector3.new(expectedPosition.X, 0, expectedPosition.Z)).Magnitude or 0
+            local candidateGain = candidate:FindFirstChild("strengthGain")
+            local gainMatches = definition.strengthGain == nil
+                or (candidateGain and tonumber(candidateGain.Value) == tonumber(definition.strengthGain))
+            if seat and seat:IsA("Seat") and expectedDistance <= 1400 and gainMatches then
+                if machineIsActive(candidate, seat, currentHumanoid) then
+                    return candidate, seat
+                end
+                local inUseUserId = tonumber(candidate:GetAttribute("InUseUserId"))
+                local available = (seat.Occupant == nil or seat.Occupant == currentHumanoid)
+                    and (inUseUserId == nil or inUseUserId == LP.UserId)
+                local requirement = 0
+                local requirements = candidate:FindFirstChild("requirements")
+                if available and requirements then
+                    for _, value in ipairs(requirements:GetChildren()) do
+                        if value:IsA("ValueBase") then
+                            local playerValue = getPlayerStat(LP, { value.Name })
+                            local needed = tonumber(value.Value) or 0
+                            if not playerValue or (tonumber(State.getFunctionalStatValue(playerValue)) or 0) < needed then
+                                available = false
+                                break
+                            end
+                            requirement = math.max(requirement, needed)
+                        end
+                    end
+                end
+                if available then
+                    local strengthGain = tonumber(candidateGain and candidateGain.Value) or 0
+                    local distance = referencePosition and (seat.Position - referencePosition).Magnitude or 0
+                    if strengthGain > bestGain
+                        or (strengthGain == bestGain and requirement > bestRequirement)
+                        or (strengthGain == bestGain and requirement == bestRequirement and distance < bestDistance) then
+                        bestMachine, bestSeat = candidate, seat
+                        bestGain, bestRequirement, bestDistance = strengthGain, requirement, distance
+                    end
+                end
+            end
+        end
+    end
+    return bestMachine, bestSeat
+end
+
+
+local function machineTargetCFrame(machine, seat, fallback, humanoid, root)
+    if seat and seat:IsA("BasePart") then
+        local rootHalf = root and root.Size.Y * 0.5 or 1
+        local seatHalf = seat.Size.Y * 0.5
+        local hipAllowance = humanoid and math.max(0.15, humanoid.HipHeight * 0.12) or 0.25
+        local lift = math.clamp(rootHalf + seatHalf + hipAllowance, 1.8, 3.3)
+        return seat.CFrame * CFrame.new(0, lift, 0)
+    end
+    if machine then
+        local ok, pivot = pcall(machine.GetPivot, machine)
+        if ok then return pivot end
+    end
+    return fallback
+end
+
+
+FastFarm.SafeMachineLockCFrame = function(character, frame)
+    local expectedY = character and tonumber(character:GetAttribute("MachineStandHrpY"))
+    if frame and expectedY and frame.Position.Y < expectedY - 0.15 then
+        frame = frame + Vector3.new(0, expectedY - frame.Position.Y, 0)
+    end
+    return frame
+end
+
+
+local function machineRepDelay(machine)
+    local repTime = machine and machine:FindFirstChild("repTime", true)
+    local attributeRepTime = machine and machine:GetAttribute("repTime")
+    local delay = math.max(0.15, tonumber(attributeRepTime) or tonumber(repTime and repTime.Value) or 1)
+    local owned = LP:FindFirstChild("ownedGamepasses")
+    if owned and owned:FindFirstChild("x2 Rep Time") then
+        delay = delay * 0.5
+    end
+    if not machineFunctions then
+        pcall(function()
+            local shared = ReplicatedStorage:FindFirstChild("shared")
+            local modules = shared and shared:FindFirstChild("modules")
+            local module = (modules and modules:FindFirstChild("GlobalFunctions"))
+                or ReplicatedStorage:FindFirstChild("globalFunctions")
+            if module and module:IsA("ModuleScript") then
+                machineFunctions = require(module)
+            end
+        end)
+    end
+    if machineFunctions then
+        local okUltimate, ultimate = pcall(machineFunctions.calculateUltimateRepTime, LP)
+        if okUltimate then
+            delay = delay * (1 - math.clamp(tonumber(ultimate) or 0, 0, 0.9))
+        end
+        local okPet, petBoost = pcall(machineFunctions.calculatePetRepTimeBoost, LP)
+        if okPet then
+            delay = delay * (1 - math.clamp(tonumber(petBoost) or 0, 0, 0.9))
+        end
+    end
+    return math.max(0.12, delay + 0.025)
+end
+
+
+local function useMachine(definition, maximumAttempts, retryDelay)
+    local root = getRoot()
+    local humanoid = getHumanoid()
+    if not root or not humanoid then return false end
+    local machine, seat = getMachineParts(definition)
+    if not machine or not seat or not seat:IsA("Seat") then
+        return false
+    end
+    if machineIsActive(machine, seat, humanoid) then
+        return true, machine, seat
+    end
+    local remote = ReplicatedStorage:FindFirstChild("rEvents")
+        and ReplicatedStorage.rEvents:FindFirstChild("machineInteractRemote")
+    if not remote or not remote:IsA("RemoteFunction") then
+        return false
+    end
+    local attempts = math.max(1, tonumber(maximumAttempts) or 4)
+    for attempt = 1, attempts do
+        repeat
+        if machineIsActive(machine, seat, humanoid) then
+            return true, machine, seat
+        end
+        local targetCFrame = machineTargetCFrame(machine, seat, definition.fallback, humanoid, root)
+        if not targetCFrame then return false end
+        if seat.Occupant and seat.Occupant ~= humanoid then
+            return false, machine, seat, "occupied"
+        end
+        root.Anchored = false
+        local character = LP.Character
+        if character then
+            pcall(character.PivotTo, character, targetCFrame)
+        end
+        root.CFrame = targetCFrame
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        RunService.Heartbeat:Wait()
+        task.wait(FastFarm.mode == "strength" and 0.02 or (attempt == 1 and 0.1 or 0.06))
+        local invoked, accepted, rejectionReason = pcall(remote.InvokeServer, remote, "useMachine", seat)
+        if FastFarm.mode == "rebirth" and FastFarm.currentCycle then
+            local cycle = FastFarm.currentCycle
+            cycle.machineAttempts = cycle.machineAttempts or {}
+            if #cycle.machineAttempts < 20 then
+                cycle.machineAttempts[#cycle.machineAttempts + 1] = {
+                    machine = machine.Name, accepted = invoked and accepted == true,
+                    reason = tostring(rejectionReason), at = os.clock() - cycle.startedAt,
+                }
+            end
+        end
+        if invoked and accepted == true then
+            FastFarm.acceptedMachine = machine
+            FastFarm.acceptedMachineSeat = seat
+        elseif invoked and accepted == false then
+            if attempt < attempts then
+                local retryWait = tonumber(retryDelay) or 0.22
+                task.wait(retryWait)
+                break
+            else
+                return false, machine, seat, rejectionReason
+            end
+        elseif not invoked then
+            return false, machine, seat, "invokeFailed"
+        end
+        local entryWait = FastFarm.MachineEntryWait or 2.3
+        if FastFarm.mode == "strength" then
+            entryWait = math.clamp(0.35 + math.max(0, getPing()) * 0.0015, 0.55, 1.4)
+        end
+        local deadline = time() + entryWait
+        repeat
+            if machineIsActive(machine, seat, humanoid) then
+                return true, machine, seat
+            end
+            RunService.Heartbeat:Wait()
+        until time() >= deadline
+        machine, seat = getMachineParts(definition)
+        if not machine or not seat then
+            return false
+        end
+        until true
+    end
+    return machineIsActive(machine, seat, humanoid), machine, seat
+end
+
+
+local function leaveMachine()
+    FastFarm.MachineVisuals.stopAnimations(0.1)
+    FastFarm.acceptedMachine = nil
+    FastFarm.acceptedMachineSeat = nil
+    local remote = ReplicatedStorage:FindFirstChild("rEvents")
+        and ReplicatedStorage.rEvents:FindFirstChild("machineInteractRemote")
+    if remote and remote:IsA("RemoteFunction") then
+        if State.shuttingDown then
+            task.spawn(function()
+                pcall(remote.InvokeServer, remote, "leaveMachine")
+            end)
+        else
+            pcall(remote.InvokeServer, remote, "leaveMachine")
+        end
+    end
+    local humanoid = getHumanoid()
+    if humanoid and humanoid.SeatPart then
+        humanoid.Sit = false
+    end
+end
+setHideFrames(false)
+
+
+function FastFarm.RegisterMachineToggle(definition, toggle)
+    FastFarm.MachineToggleByDefinition[definition] = toggle
+end
+
+
+function FastFarm.SelectMachineToggle(activeToggle)
+    if FastFarm.machineToggleSync then
+        return
+    end
+    if FastFarm.StopFastModesForManualFarm then
+        FastFarm.StopFastModesForManualFarm()
+    end
+    for _, toggle in ipairs(FastFarm.RepToggles or {}) do
+        pcall(function()
+            if toggle:Get() then
+                toggle:Set(false)
+            end
+        end)
+    end
+    FastFarm.machineToggleSync = true
+    for _, toggle in pairs(FastFarm.MachineToggleByDefinition) do
+        if toggle ~= activeToggle and toggle.Get and toggle.Set then
+            pcall(function()
+                if toggle:Get() then
+                    toggle:Set(false)
+                end
+            end)
+        end
+    end
+    FastFarm.machineToggleSync = false
+end
+
+
+function FastFarm.SwitchOffMachineToggle(definition)
+    local toggle = FastFarm.MachineToggleByDefinition[definition]
+    if toggle and toggle.Get and toggle:Get() then
+        toggle:Set(false, true)
+    end
+end
+
+
+local function setMachine(definition, enabled)
+    local previous = State.machine
+    machineGeneration = machineGeneration + 1
+    local generation = machineGeneration
+    stopThread("machine")
+    if not enabled then
+        State.machine = nil
+        local humanoid = getHumanoid()
+        local machineInUse = LP:FindFirstChild("machineInUse")
+        local mounted = previous ~= nil
+            or FastFarm.acceptedMachine ~= nil
+            or (machineInUse and machineInUse.Value ~= nil)
+            or (humanoid and humanoid.SeatPart ~= nil)
+        if mounted then
+            leaveMachine()
+        else
+            FastFarm.MachineVisuals.stopAnimations(0.1)
+        end
+        return
+    end
+    State.machine = definition
+    FastFarm.lastMachineError = nil
+    startThread("machine", function()
+        local lastInteract = 0
+        local lastRep = 0
+        local mountDefinition = {}
+        for key, value in pairs(definition) do mountDefinition[key] = value end
+        local pinnedMachine = getMachineParts(definition)
+        if pinnedMachine then mountDefinition.instance = pinnedMachine end
+        if previous and previous ~= definition then
+            leaveMachine()
+            task.wait(0.15)
+        end
+        local machineReady, machine, seat, rejectionReason = useMachine(mountDefinition, 3, 0.35)
+        if rejectionReason == "isKingMachine" then
+            FastFarm.MachineVisuals.stopAnimations(0.1)
+            FastFarm.lastMachineError = rejectionReason
+            State.machine = nil
+            FastFarm.SwitchOffMachineToggle(definition)
+            return
+        end
+        lastInteract = time()
+        while State.running and State.machine == definition and machineGeneration == generation do
+            local humanoid = getHumanoid()
+            if not machineReady or not machineIsActive(machine, seat, humanoid) then
+                if FastFarm.MachineVisuals.activeMachine == machine then
+                    FastFarm.MachineVisuals.stopAnimations(0.1)
+                end
+                if time() - lastInteract >= 0.65 then
+                    lastInteract = time()
+                    machineReady, machine, seat, rejectionReason = useMachine(mountDefinition, 3, 0.35)
+                    if rejectionReason == "isKingMachine" then
+                        FastFarm.MachineVisuals.stopAnimations(0.1)
+                        FastFarm.lastMachineError = rejectionReason
+                        State.machine = nil
+                        FastFarm.SwitchOffMachineToggle(definition)
+                        return
+                    end
+                end
+                task.wait(0.03)
+            else
+                FastFarm.MachineVisuals.playIdle(machine, seat)
+                local fastMode = (definition.fullTrain and State.fullTrainMode == "Fast Rep")
+                    or (definition.autoFarm and State.autoFarmMode == "Fast Rep")
+                local delay = fastMode
+                    and math.max(0.02, tonumber(definition.repInterval) or 0.025)
+                    or machineRepDelay(machine)
+                if time() - lastRep >= delay then
+                    local muscleEvent = LP:FindFirstChild("muscleEvent") or ReplicatedStorage:FindFirstChild("muscleEvent")
+                    if muscleEvent and muscleEvent:IsA("RemoteEvent") and machineIsActive(machine, seat, humanoid) then
+                        local sent = pcall(muscleEvent.FireServer, muscleEvent, "rep", seat)
+                        if sent then
+                            lastRep = time()
+                            FastFarm.MachineVisuals.playRep(machine, fastMode and 8 or nil)
+                        end
+                    end
+                end
+                task.wait(fastMode and 0.02 or 0.035)
+            end
+        end
+    end)
+end
+
+
+function FastFarm.StopFastModesForManualFarm()
+    local stoppedByToggle = false
+    for _, toggle in ipairs({ FastFarm.StrengthToggle, FastFarm.RebirthToggle }) do
+        if toggle and toggle.Get and toggle.Set and toggle:Get() then
+            stoppedByToggle = true
+            toggle:Set(false)
+        end
+    end
+    if not stoppedByToggle and FastFarm.mode and FastFarm.Stop then
+        FastFarm:Stop(true)
+    end
+end
+
+
+function FastFarm.StopMachineForExercise()
+    if FastFarm.machineToggleSync then
+        return
+    end
+    local activeDefinition = State.machine
+    FastFarm.machineToggleSync = true
+    for _, toggle in pairs(FastFarm.MachineToggleByDefinition) do
+        if toggle.Get and toggle.Set then
+            pcall(function()
+                if toggle:Get() then
+                    toggle:Set(false)
+                end
+            end)
+        end
+    end
+    FastFarm.machineToggleSync = false
+    if activeDefinition then
+        setMachine(activeDefinition, false)
+    end
+end
+
+do
+    FastFarm.generation = 0
+    FastFarm.warningAccepted = false
+    FastFarm.mode = nil
+    FastFarm.startedAt = nil
+    FastFarm.sessionStartedAt = nil
+    FastFarm.startStats = nil
+    FastFarm.lockCFrame = nil
+    FastFarm.lockCharacter = nil
+    FastFarm.machine = nil
+    FastFarm.machineSeat = nil
+    FastFarm.machineDefinition = nil
+    FastFarm.machineFailureCooldowns = {}
+    FastFarm.lastMachineSelection = nil
+    FastFarm.hideFramesOwned = false
+    FastFarm.packCount = 0
+    FastFarm.petSlotCapacity = 1
+    FastFarm.requiredPackCount = 1
+    FastFarm.strengthPack = nil
+    FastFarm.strengthPackCount = 0
+    FastFarm.strengthPackRepBoost = 0
+    FastFarm.rebirthPack = nil
+    FastFarm.rebirthPackCount = 0
+    FastFarm.expectedRebirthDelta = 0
+    FastFarm.cycleStrengthGain = 0
+    FastFarm.lastTargetStrength = 0
+    FastFarm.cycleCount = 0
+    FastFarm.successfulRebirths = 0
+    FastFarm.failedRebirths = 0
+    FastFarm.validRebirthSamples = {}
+    FastFarm.validStrengthSamples = {}
+    FastFarm.lastSuccessfulRebirthAt = nil
+    FastFarm.rebirthMeasurementStartedAt = nil
+    FastFarm.nextRebirthRequestAt = nil
+    FastFarm.lastStrengthSampleAt = nil
+    FastFarm.lastStrengthSampleValue = nil
+    FastFarm.lastRequiredStrength = 0
+    FastFarm.lastRebirthAccepted = false
+    FastFarm.lastError = nil
+    FastFarm.cachedPing = 0
+    FastFarm.pingCheckedAt = 0
+    FastFarm.pingPaused = false
+    FastFarm.resumeSamples = 0
+    FastFarm.strengthBatch = CONFIG.FastFarm.StrengthStartBatch
+    FastFarm.lastBatchAdjust = 0
+    FastFarm.pingReducer = false
+    FastFarm.sizeInvokeBusy = false
+    FastFarm.lastSizeInvoke = 0
+    FastFarm.sizeReleaseGeneration = 0
+    FastFarm.frameReleaseGeneration = 0
+    FastFarm.bootstrapAutoWeight = false
+    FastFarm.nextMachineAcquireAt = 0
+
+
+    function FastFarm:SetPingReducer(enabled)
+        self.pingReducer = enabled == true
+        self.resumeSamples = 0
+        if self.pingReducer then
+            self.strengthBatch = math.min(
+                self.strengthBatch or CONFIG.FastFarm.StrengthStartBatch,
+                CONFIG.FastFarm.StrengthStartBatch
+            )
+        end
+        return self.pingReducer
+    end
+
+
+    local function readStat(names)
+        local value = getPlayerStat(LP, names)
+        return value and tonumber(State.getFunctionalStatValue(value)) or 0, value
+    end
+
+
+    local function readStats()
+        local rebirths = readStat({ "Rebirths", "Rebirth" })
+        local strength = readStat({ "Strength", "Fuerza" })
+        local durability = readStat({ "Durability", "Resistencia" })
+        return {
+            rebirths = rebirths,
+            strength = strength,
+            durability = durability,
+        }
+    end
+
+
+    local function farmEvents()
+        return ReplicatedStorage:FindFirstChild("rEvents")
+    end
+
+
+    local function unequipAllPets()
+        local events = farmEvents()
+        local remote = events and events:FindFirstChild("equipPetEvent")
+        local equippedPets = LP:FindFirstChild("equippedPets")
+        if not remote or not equippedPets then
+            return false
+        end
+        for _, slot in ipairs(equippedPets:GetChildren()) do
+            local reference = slot:FindFirstChild("petReference")
+            local pet = reference and reference:IsA("ObjectValue") and reference.Value
+            if pet then
+                pcall(remote.FireServer, remote, "unequipPet", pet)
+            end
+        end
+        RunService.Heartbeat:Wait()
+        local deadline = time() + 1.2
+        repeat
+            local remaining = 0
+            for _, slot in ipairs(equippedPets:GetChildren()) do
+                local reference = slot:FindFirstChild("petReference")
+                if reference and reference:IsA("ObjectValue") and reference.Value then
+                    remaining = remaining + 1
+                end
+            end
+            if remaining == 0 then return true end
+            task.wait(0.04)
+        until time() >= deadline
+        return false
+    end
+
+
+    function FastFarm:GetPetSlotCapacity()
+        local capacity = 2
+        if LP.MembershipType == Enum.MembershipType.Premium then
+            capacity = capacity + 1
+        end
+        local ownedGamepasses = LP:FindFirstChild("ownedGamepasses")
+        if ownedGamepasses and ownedGamepasses:FindFirstChild("+2 Pet Slots") then
+            capacity = capacity + 2
+        end
+        local petSlotAttribute = UltimateAttributes["+1 Pet Slot"] or "UltimatePetSlot"
+        local ultimateSlots = LP:GetAttribute(petSlotAttribute)
+        if typeof(ultimateSlots) == "number" then
+            capacity = capacity + math.max(0, math.floor(ultimateSlots))
+        end
+        local industrialSlot = LP:GetAttribute("IndustrialPetSlot")
+        if industrialSlot == true or industrialSlot == 1 then
+            capacity = capacity + 1
+        end
+        local availableSlotObjects = 0
+        local equippedPets = LP:FindFirstChild("equippedPets")
+        if equippedPets then
+            for _, slot in ipairs(equippedPets:GetChildren()) do
+                if slot:IsA("ObjectValue") then
+                    availableSlotObjects = availableSlotObjects + 1
+                end
+            end
+        end
+        if availableSlotObjects > 0 then
+            capacity = math.min(capacity, availableSlotObjects)
+        end
+        self.petSlotCapacity = math.clamp(capacity, 1, CONFIG.FastFarm.MaxPets)
+        return self.petSlotCapacity
+    end
+
+
+    function FastFarm:CountOwnedPet(name)
+        local count = 0
+        local petsFolder = LP:FindFirstChild("petsFolder")
+        if petsFolder then
+            for _, folder in ipairs(petsFolder:GetChildren()) do
+                if folder:IsA("Folder") then
+                    for _, pet in ipairs(folder:GetChildren()) do
+                        if pet:IsA("StringValue") and pet.Name == name then
+                            count = count + 1
+                        end
+                    end
+                end
+            end
+        end
+        return count
+    end
+
+
+    function FastFarm:GetPackCatalog(force)
+        if not force and self.packCatalog and time() - (self.packCatalogAt or 0) < 30 then return self.packCatalog end
+        local shared = ReplicatedStorage:FindFirstChild("shared")
+        local runtime = shared and shared:FindFirstChild("runtime")
+        local catalog = runtime and runtime:FindFirstChild("packPetPerks")
+        local modules = shared and shared:FindFirstChild("modules")
+        local module = modules and modules:FindFirstChild("GlobalFunctions")
+        local ok, functions = pcall(function() return module and require(module) end)
+        if not catalog or not ok or type(functions) ~= "table" then return self.packCatalog or {} end
+        local result, owned = {}, {}
+        local inventory = LP:FindFirstChild("petsFolder")
+        for _, folder in ipairs(inventory and inventory:GetChildren() or {}) do
+            for _, pet in ipairs(folder:GetChildren()) do
+                if pet:IsA("StringValue") then owned[pet.Name] = (owned[pet.Name] or 0) + 1 end
+            end
+        end
+        local sample = Instance.new("Folder")
+        local equipped = Instance.new("Folder")
+        equipped.Name, equipped.Parent = "equippedPets", sample
+        local slot = Instance.new("ObjectValue")
+        slot.Parent = equipped
+        local reference = Instance.new("ObjectValue")
+        reference.Name, reference.Parent = "petReference", slot
+        for _, item in ipairs(catalog:GetChildren()) do
+            local perks = item:FindFirstChild("perksFolder")
+            local strength = perks and perks:FindFirstChild("strength")
+            local entry = { name = item.Name, owned = owned[item.Name] or 0, ref = item,
+                strength = strength and tonumber(strength.Value) or 0 }
+            slot.Value, reference.Value = item, item
+            for key, method in pairs({ repSpeed = "calculatePetRepTimeBoost",
+                strengthBonus = "calculatePetStrengthGainMultiplier", rebirthBonus = "calculatePetRebirthGainMultiplier" }) do
+                if type(functions[method]) == "function" then
+                    local calculated, value = pcall(functions[method], sample)
+                    if calculated and type(value) == "number" then entry[key] = value end
+                end
+            end
+            result[#result + 1] = entry
+        end
+        sample:Destroy()
+        table.sort(result, function(a, b) return a.name < b.name end)
+        self.packCatalog, self.packCatalogAt = result, time()
+        return result
+    end
+
+
+    function FastFarm:GetModes(force)
+        local cap = self:GetPetSlotCapacity()
+        local byName = {}
+        for _, pet in ipairs(self:GetPackCatalog(force)) do byName[pet.name] = pet end
+        local out = {}
+        for key, pack in pairs(CONFIG.FastFarm.Packs) do
+            local strength = 0
+            for _, name in ipairs(pack.strength) do
+                strength = strength + math.min(cap, tonumber(byName[name] and byName[name].owned) or 0)
+            end
+            local rebirth = math.min(cap, tonumber(byName[pack.rebirth] and byName[pack.rebirth].owned) or 0)
+            out[key] = { key = key, label = pack.label, available = strength > 0 and rebirth > 0,
+                strength = strength, rebirth = rebirth, pets = byName }
+        end
+        self.packModes = out
+        return out
+    end
+
+
+    function FastFarm:LoadPack(force)
+        local modes = self:GetModes(force)
+        local mode = modes[self.packMode]
+        if not mode or not mode.available then
+            for _, fallbackMode in ipairs({ "chaos", "ultra" }) do
+                if modes[fallbackMode] and modes[fallbackMode].available then
+                    self.packMode = fallbackMode
+                    mode = modes[fallbackMode]
+                    break
+                end
+            end
+        end
+        if not mode or not mode.available then
+            self.strengthPack, self.rebirthPack = nil, nil
+            self.strengthSetup, self.rebirthSetup = nil, nil
+            self.strengthPackCount, self.rebirthPackCount = 0, 0
+            self.strengthPackRepBoost, self.expectedRebirthDelta = 0, 0
+            return false, false
+        end
+        local cap = self:GetPetSlotCapacity()
+        local pack = CONFIG.FastFarm.Packs[self.packMode]
+        local s = {}
+        if self.packMode == "ultra" then
+            local hound, omega = mode.pets[pack.strength[1]], mode.pets[pack.strength[2]]
+            local hMax = math.min(cap, tonumber(hound and hound.owned) or 0)
+            local oMax = math.min(cap, tonumber(omega and omega.owned) or 0)
+            local bestH, bestO, bestScore, bestUsed = 0, 0, -1, 0
+            for h = 0, hMax do
+                for o = 0, math.min(oMax, cap - h) do
+                    local used = h + o
+                    if used > 0 then
+                        local base = h * (tonumber(hound.strength) or 0) + o * (tonumber(omega.strength) or 0)
+                        local bonus = h * (tonumber(hound.strengthBonus) or 0)
+                            + o * (tonumber(omega.strengthBonus) or 0)
+                        local speed = h * (tonumber(hound.repSpeed) or 0) + o * (tonumber(omega.repSpeed) or 0)
+                        local score = base * (1 + bonus) / math.max(0.10, 1 - math.min(0.90, speed))
+                        if score > bestScore or (score == bestScore and used > bestUsed) then
+                            bestH, bestO, bestScore, bestUsed = h, o, score, used
+                        end
+                    end
+                end
+            end
+            if bestH > 0 then s[#s + 1] = { name = hound.name, count = bestH, data = hound } end
+            if bestO > 0 then s[#s + 1] = { name = omega.name, count = bestO, data = omega } end
+        else
+            local pet = mode.pets[pack.strength[1]]
+            local count = math.min(cap, tonumber(pet and pet.owned) or 0)
+            if count > 0 then s[1] = { name = pet.name, count = count, data = pet } end
+        end
+        local rPet = mode.pets[pack.rebirth]
+        local rCount = math.min(cap, tonumber(rPet and rPet.owned) or 0)
+        local r = rCount > 0 and { { name = rPet.name, count = rCount, data = rPet } } or {}
+        local sCount, rep = 0, 0
+        for _, part in ipairs(s) do
+            sCount = sCount + part.count
+            rep = rep + (tonumber(part.data.repSpeed) or 0) * part.count
+        end
+        self.strengthSetup, self.rebirthSetup = s, r
+        self.strengthPack, self.rebirthPack = "s:" .. self.packMode, "r:" .. self.packMode
+        self.strengthPackCount, self.rebirthPackCount = sCount, rCount
+        self.strengthPackRepBoost = rep
+        self.expectedRebirthDelta = math.max(1,
+            math.floor((tonumber(rPet.rebirthBonus) or 0) * rCount + 0.5))
+        return sCount > 0, rCount > 0
+    end
+
+
+    local function equipPetByName(name, requestedCount)
+        local events = farmEvents()
+        local remote = events and events:FindFirstChild("equipPetEvent")
+        local petsFolder = LP:FindFirstChild("petsFolder")
+        if not remote or not petsFolder then
+            return 0
+        end
+        local pets = {}
+        for _, folder in ipairs(petsFolder:GetChildren()) do
+            if folder:IsA("Folder") then
+                for _, pet in ipairs(folder:GetChildren()) do
+                    if pet.Name == name then
+                        pets[#pets + 1] = pet
+                    end
+                end
+            end
+        end
+        table.sort(pets, function(a, b)
+            local momentumA = tonumber(a:GetAttribute("MomentumSeconds")) or 0
+            local momentumB = tonumber(b:GetAttribute("MomentumSeconds")) or 0
+            if momentumA ~= momentumB then
+                return momentumA > momentumB
+            end
+            return a:GetFullName() < b:GetFullName()
+        end)
+        local target = math.min(requestedCount or FastFarm:GetPetSlotCapacity(), FastFarm:GetPetSlotCapacity(), #pets)
+        FastFarm.requiredPackCount = math.max(1, target)
+        if target < 1 then
+            FastFarm.lastError = "Pack not found: " .. tostring(name)
+            return 0
+        end
+        for index = 1, target do
+            pcall(remote.FireServer, remote, "equipPet", pets[index])
+        end
+        RunService.Heartbeat:Wait()
+        local equippedPets = LP:FindFirstChild("equippedPets")
+        local deadline = time() + 1.4
+        repeat
+            local confirmed = 0
+            if equippedPets then
+                for _, slot in ipairs(equippedPets:GetChildren()) do
+                    local reference = slot:FindFirstChild("petReference")
+                    local pet = reference and reference:IsA("ObjectValue") and reference.Value
+                    if pet and pet.Name == name then confirmed = confirmed + 1 end
+                end
+            end
+            if confirmed >= target then
+                FastFarm.lastError = nil
+                return confirmed
+            end
+            task.wait(0.04)
+        until time() >= deadline
+        FastFarm.lastError = "Equipment not confirmed for " .. tostring(name)
+        return 0
+    end
+
+
+    local function switchPetPack(name, requestedCount)
+        local generation = FastFarm.generation
+        local events = farmEvents()
+        local remote = events and events:FindFirstChild("equipPetEvent")
+        local petsFolder = LP:FindFirstChild("petsFolder")
+        local equippedPets = LP:FindFirstChild("equippedPets")
+        if not remote or not petsFolder or not equippedPets then
+            return 0
+        end
+
+        local targets = {}
+        FastFarm.packCache = FastFarm.packCache or {}
+        local cached = FastFarm.packCache[name]
+        local validCache = cached and time() - cached.at < 30
+        if validCache then
+            for _, pet in ipairs(cached.pets) do
+                if not pet:IsDescendantOf(petsFolder) or pet.Name ~= name then validCache = false; break end
+            end
+        end
+        if validCache then targets = cached.pets else
+        for _, folder in ipairs(petsFolder:GetChildren()) do
+            if folder:IsA("Folder") then
+                for _, pet in ipairs(folder:GetChildren()) do
+                    if pet.Name == name then targets[#targets + 1] = pet end
+                end
+            end
+        end
+        FastFarm.packCache[name] = { at = time(), pets = targets }
+        end
+        table.sort(targets, function(a, b)
+            local momentumA = tonumber(a:GetAttribute("MomentumSeconds")) or 0
+            local momentumB = tonumber(b:GetAttribute("MomentumSeconds")) or 0
+            if momentumA ~= momentumB then return momentumA > momentumB end
+            return a:GetFullName() < b:GetFullName()
+        end)
+        local target = math.min(requestedCount or FastFarm:GetPetSlotCapacity(), FastFarm:GetPetSlotCapacity(), #targets)
+        FastFarm.requiredPackCount = math.max(1, target)
+        if target < 1 or #targets < target or FastFarm:GetPetSlotCapacity() < target then
+            FastFarm.lastError = "Pack not found: " .. tostring(name)
+            return 0
+        end
+        local selected = {}
+        for index = 1, target do selected[targets[index]] = true end
+
+        local function confirmedReferences()
+            local found, occupied, seen = 0, 0, {}
+            for _, slot in ipairs(equippedPets:GetChildren()) do
+                local reference = slot:FindFirstChild("petReference")
+                local pet = reference and reference:IsA("ObjectValue") and reference.Value
+                if pet then
+                    occupied = occupied + 1
+                    if slot:IsA("ObjectValue") and slot.Value and selected[pet]
+                        and pet.Parent and not seen[pet] then
+                        seen[pet] = true
+                        found = found + 1
+                    end
+                end
+            end
+            return found == target and occupied == target
+        end
+
+        local matching = 0
+        local occupied = 0
+        for _, slot in ipairs(equippedPets:GetChildren()) do
+            local reference = slot:FindFirstChild("petReference")
+            local pet = reference and reference:IsA("ObjectValue") and reference.Value
+            if pet then
+                occupied = occupied + 1
+                if pet.Name == name then matching = matching + 1 end
+            end
+        end
+        if matching == target and occupied == target and confirmedReferences() then
+            FastFarm.confirmedPack = { name = name, references = selected, count = target }
+            FastFarm.lastError = nil
+            return matching
+        end
+        local network = FastFarm:GetRebirthNetwork()
+        while os.clock() < (network.petNextSendAt or 0) do
+            if not State.running or FastFarm.generation ~= generation then return 0 end
+            task.wait(0.05)
+        end
+        if confirmedReferences() then
+            FastFarm.confirmedPack = { name = name, references = selected, count = target }
+            return target
+        end
+        network.petNextSendAt = os.clock() + math.max(0.4, (FastFarm.cachedPing or 0) / 500)
+
+        for _, slot in ipairs(equippedPets:GetChildren()) do
+            local reference = slot:FindFirstChild("petReference")
+            local pet = reference and reference:IsA("ObjectValue") and reference.Value
+            if pet then pcall(remote.FireServer, remote, "unequipPet", pet) end
+        end
+        for index = 1, target do
+            pcall(remote.FireServer, remote, "equipPet", targets[index])
+        end
+
+        local deadline = time() + math.max(1.4, (FastFarm.cachedPing or 0) / 1000 * 4)
+        repeat
+            if not State.running or FastFarm.generation ~= generation then return 0 end
+            local confirmed = 0
+            for _, slot in ipairs(equippedPets:GetChildren()) do
+                local reference = slot:FindFirstChild("petReference")
+                local pet = reference and reference:IsA("ObjectValue") and reference.Value
+                if pet and pet.Name == name then confirmed = confirmed + 1 end
+            end
+            if confirmed >= target and confirmedReferences() then
+                FastFarm.confirmedPack = { name = name, references = selected, count = target }
+                FastFarm.lastError = nil
+                return confirmed
+            end
+            RunService.Heartbeat:Wait()
+        until time() >= deadline
+        FastFarm.lastError = "Equipment not confirmed for " .. tostring(name)
+        return 0
+    end
+    FastFarm.UnequipAllPets = unequipAllPets
+    FastFarm.EquipPack = equipPetByName
+    FastFarm.SwitchPack = switchPetPack
+
+
+    local function equipSetup(setup, key)
+        if type(setup) ~= "table" or #setup < 1 then return 0 end
+        if #setup == 1 and not setup[1].pets then
+            local count = switchPetPack(setup[1].name, setup[1].count)
+            if count > 0 and FastFarm.confirmedPack then FastFarm.confirmedPack.name = key end
+            return count
+        end
+        local generation = FastFarm.generation
+        local events = farmEvents()
+        local remote = events and events:FindFirstChild("equipPetEvent")
+        local pets = LP:FindFirstChild("petsFolder")
+        local equipped = LP:FindFirstChild("equippedPets")
+        if not remote or not pets or not equipped then return 0 end
+        local targets = {}
+        for _, part in ipairs(setup) do
+            local found = {}
+            
