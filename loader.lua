@@ -998,3 +998,1003 @@ State.playFastPunchVisual = function()
     for index, track in ipairs(visual.tracks) do
         if index ~= visual.index and track.IsPlaying then
             pcall(track.Stop, track, 0.02)
+         end
+    end
+    pcall(visual.tracks[visual.index].Play, visual.tracks[visual.index], 0.02, 1, 1.8)
+end
+
+
+local function setFastPunch(enabled)
+    State.fastPunchGeneration = State.fastPunchGeneration + 1
+    local generation = State.fastPunchGeneration
+    State.fastPunch = enabled == true
+    if not State.fastPunch then
+        State.fastPunchToolPaused = false
+        clearRockSelection()
+        stopThread("fastPunchEquip")
+        stopThread("fastPunchHit")
+        State.clearFastPunchVisual()
+        pcall(function()
+            local character = getCharacter()
+            local punch = character and character:FindFirstChild("Punch")
+            local attackTime = punch and punch:FindFirstChild("attackTime")
+            if attackTime then attackTime.Value = 0.3 end
+            local backpack = LP:FindFirstChild("Backpack")
+            if punch and backpack then punch.Parent = backpack end
+        end)
+        return
+    end
+    startThread("fastPunchEquip", function()
+        while State.running and State.fastPunch and State.fastPunchGeneration == generation do
+            pcall(function()
+                local punch = not State.fastPunchToolPaused and getPunch() or nil
+                local attackTime = punch and punch:FindFirstChild("attackTime")
+                if attackTime then attackTime.Value = 0 end
+            end)
+            task.wait(0.05)
+        end
+    end)
+    startThread("fastPunchHit", function()
+        local lastVisual = 0
+        while State.running and State.fastPunch and State.fastPunchGeneration == generation do
+            if not activeRockFarm then
+                local event = LP:FindFirstChild("muscleEvent")
+                local punch = not State.fastPunchToolPaused and getPunch() or nil
+                if event and event:IsA("RemoteEvent") then
+                    pcall(event.FireServer, event, "punch", "rightHand")
+                    pcall(event.FireServer, event, "punch", "leftHand")
+                end
+                if punch and time() - lastVisual >= 0.12 then
+                    lastVisual = time()
+                    pcall(punch.Activate, punch)
+                    State.playFastPunchVisual()
+                end
+            end
+            task.wait(0.01)
+        end
+    end)
+end
+
+local repTimeOriginals = {}
+
+do
+    local movement = State.exerciseMovement
+    movement.toolKinds = {
+        ["weight"] = "Weight",
+        ["heavy weight"] = "Weight",
+        ["handstand"] = "Handstands",
+        ["handstands"] = "Handstands",
+        ["pushup"] = "Pushups",
+        ["pushups"] = "Pushups",
+        ["situp"] = "Situps",
+        ["situps"] = "Situps",
+    }
+    movement.animationIds = {}
+
+    movement.idsFor = function(kind)
+        local cached = movement.animationIds[kind]
+        if cached then return cached end
+        cached = {}
+        local shared = ReplicatedStorage:FindFirstChild("shared")
+        local assets = shared and shared:FindFirstChild("assets")
+        local animations = assets and assets:FindFirstChild("animations")
+        local gameAnims = animations and animations:FindFirstChild("gameAnims")
+        local tools = gameAnims and gameAnims:FindFirstChild("Tools")
+        local folder = tools and tools:FindFirstChild(kind)
+        if folder then
+            for _, animation in ipairs(folder:GetDescendants()) do
+                if animation:IsA("Animation") and animation.AnimationId ~= "" then
+                    cached[animation.AnimationId] = true
+                end
+            end
+        end
+        movement.animationIds[kind] = cached
+        return cached
+    end
+
+    movement.stopTracks = function(humanoid, kind)
+        local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+        if not animator or not kind then return end
+        local ids = movement.idsFor(kind)
+        for _, animationTrack in ipairs(animator:GetPlayingAnimationTracks()) do
+            local animation = animationTrack.Animation
+            if animation and ids[animation.AnimationId] then
+                animationTrack:Stop(0.03)
+            end
+        end
+    end
+
+    movement.bindHumanoid = function(humanoid)
+        if movement.boundHumanoid == humanoid then return end
+        if movement.animationConnection then
+            movement.animationConnection:Disconnect()
+            movement.animationConnection = nil
+        end
+        movement.boundHumanoid = humanoid
+        local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+        if animator then
+            movement.animationConnection = animator.AnimationPlayed:Connect(function(animationTrack)
+                local tool = movement.freeTool
+                local kind = tool and tool.Parent and movement.toolKinds[tool.Name:lower()]
+                local animation = animationTrack.Animation
+                if kind and animation and movement.idsFor(kind)[animation.AnimationId] then
+                    animationTrack:Stop(0.03)
+                end
+            end)
+        end
+    end
+
+    movement.freedomStep = function()
+        if not State.running then return end
+        local character = getCharacter()
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if not character or not humanoid or not root then
+            movement.bindHumanoid(nil)
+            movement.freeTool = nil
+            movement.cameraDistance = nil
+            return
+        end
+        movement.bindHumanoid(humanoid)
+        local tool = character:FindFirstChildWhichIsA("Tool")
+        local kind = tool and movement.toolKinds[tool.Name:lower()]
+        if not kind then
+            movement.freeTool = nil
+            movement.cameraDistance = nil
+            return
+        end
+        local camera = workspace.CurrentCamera
+        if movement.freeTool ~= tool then
+            movement.freeTool = tool
+            movement.freeWalkSpeed = humanoid.WalkSpeed > 0 and humanoid.WalkSpeed or 16
+            movement.cameraDistance = camera and (camera.CFrame.Position - root.Position).Magnitude or 14
+            movement.stopTracks(humanoid, kind)
+        end
+        if not State.machine and not State.fly then
+            root.Anchored = false
+            humanoid.PlatformStand = false
+            humanoid.Sit = false
+            humanoid.AutoRotate = true
+            if humanoid.WalkSpeed <= 0 then
+                humanoid.WalkSpeed = movement.freeWalkSpeed or 16
+            end
+        end
+        if camera and not State.spy and not State.miscFreecam then
+            if camera.CameraSubject ~= humanoid or camera.CameraType == Enum.CameraType.Scriptable then
+                camera.CameraSubject = humanoid
+                camera.CameraType = Enum.CameraType.Custom
+            end
+            local distance = (camera.CFrame.Position - root.Position).Magnitude
+            local expected = math.clamp(tonumber(movement.cameraDistance) or 14, 6, 80)
+            if distance > math.max(220, expected * 6) then
+                local backwards = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+                backwards = backwards.Magnitude > 0.01 and backwards.Unit or Vector3.new(0, 0, -1)
+                local offset = math.clamp(expected, 10, 34)
+                camera.CFrame = CFrame.lookAt(
+                    root.Position - backwards * offset + Vector3.new(0, math.min(8, offset * 0.35), 0),
+                    root.Position + Vector3.new(0, 2, 0)
+                )
+            elseif distance >= 5 and distance <= 120 then
+                movement.cameraDistance = distance
+            end
+        end
+    end
+    local bindName = "DARKZS_ExerciseFreedom"
+    pcall(RunService.UnbindFromRenderStep, RunService, bindName)
+    RunService:BindToRenderStep(bindName, Enum.RenderPriority.Camera.Value - 1, movement.freedomStep)
+    addCleanup(function()
+        pcall(RunService.UnbindFromRenderStep, RunService, bindName)
+        movement.bindHumanoid(nil)
+    end)
+end
+
+
+local function setFastRepTime(key, tool)
+    if not tool then
+        return
+    end
+    local repTime = tool:FindFirstChild("repTime")
+    if not repTime or not repTime:IsA("ValueBase") then
+        return
+    end
+    repTimeOriginals[key] = repTimeOriginals[key] or setmetatable({}, { __mode = "k" })
+    if repTimeOriginals[key][repTime] == nil then
+        repTimeOriginals[key][repTime] = repTime.Value
+    end
+    repTime.Value = 0
+end
+
+
+local function restoreRepTime(key)
+    local saved = repTimeOriginals[key]
+    if not saved then
+        return
+    end
+    for repTime, original in pairs(saved) do
+        if repTime and repTime.Parent then
+            pcall(function()
+                repTime.Value = original
+            end)
+        end
+    end
+    repTimeOriginals[key] = nil
+end
+
+
+local function unequipRepTools(tools)
+    local character = getCharacter()
+    local backpack = LP:FindFirstChild("Backpack")
+    if not character or not backpack or not tools then
+        return
+    end
+    local wanted = {}
+    for _, name in ipairs(tools) do
+        wanted[name:lower()] = true
+    end
+    for _, tool in ipairs(character:GetChildren()) do
+        if tool:IsA("Tool") and wanted[tool.Name:lower()] then
+            pcall(function()
+                tool.Parent = backpack
+            end)
+        end
+    end
+end
+
+
+local function setAutoRep(key, enabled, tools, interval, forceFast)
+    State[key] = enabled == true
+    local movement = State.exerciseMovement
+    movement.active[key] = State[key] or nil
+    local threadKey = "rep_" .. key
+    if not State[key] then
+        stopThread(threadKey)
+        restoreRepTime(key)
+        unequipRepTools(tools)
+        local hasActiveExercise = false
+        for _ in pairs(movement.active) do
+            hasActiveExercise = true
+            break
+        end
+        if not hasActiveExercise then
+            stopThread("exerciseMovement")
+            local humanoid = movement.humanoid
+            if humanoid and humanoid.Parent then
+                pcall(function()
+                    if not State.fastSpeed and movement.walkSpeed then
+                        humanoid.WalkSpeed = movement.walkSpeed
+                    end
+                    if movement.jumpValue then
+                        if movement.usesJumpPower then
+                            humanoid.JumpPower = movement.jumpValue
+                        else
+                            humanoid.JumpHeight = movement.jumpValue
+                        end
+                    end
+                end)
+            end
+            movement.humanoid = nil
+            movement.walkSpeed = nil
+            movement.jumpValue = nil
+        end
+        return
+    end
+    local humanoid = getHumanoid()
+    if humanoid and movement.humanoid ~= humanoid then
+        movement.humanoid = humanoid
+        movement.walkSpeed = humanoid.WalkSpeed > 0 and humanoid.WalkSpeed or 16
+        movement.usesJumpPower = humanoid.UseJumpPower
+        movement.jumpValue = movement.usesJumpPower and humanoid.JumpPower or humanoid.JumpHeight
+    end
+    startThread("exerciseMovement", function()
+        while State.running and next(movement.active) do
+            local activeHumanoid = getHumanoid()
+            local root = getRoot()
+            if activeHumanoid then
+                if movement.humanoid ~= activeHumanoid then
+                    movement.humanoid = activeHumanoid
+                    movement.walkSpeed = activeHumanoid.WalkSpeed > 0 and activeHumanoid.WalkSpeed or 16
+                    movement.usesJumpPower = activeHumanoid.UseJumpPower
+                    movement.jumpValue = movement.usesJumpPower and activeHumanoid.JumpPower or activeHumanoid.JumpHeight
+                end
+                if not State.machine and not State.fly then
+                    if root then
+                        root.Anchored = false
+                    end
+                    activeHumanoid.PlatformStand = false
+                    activeHumanoid.Sit = false
+                    local wantedSpeed = State.fastSpeed and 1000 or movement.walkSpeed
+                    if wantedSpeed and activeHumanoid.WalkSpeed < wantedSpeed then
+                        activeHumanoid.WalkSpeed = wantedSpeed
+                    end
+                    if movement.jumpValue then
+                        if movement.usesJumpPower and activeHumanoid.JumpPower < movement.jumpValue then
+                            activeHumanoid.JumpPower = movement.jumpValue
+                        elseif not movement.usesJumpPower and activeHumanoid.JumpHeight < movement.jumpValue then
+                            activeHumanoid.JumpHeight = movement.jumpValue
+                        end
+                    end
+                end
+            end
+            RunService.Heartbeat:Wait()
+        end
+    end)
+    startThread(threadKey, function()
+        while State.running and State[key] do
+            local repDelay = interval or 0.01
+            pcall(function()
+                local tool
+                if tools and #tools > 0 then
+                    tool = equipTool(tools)
+                    if forceFast or State.autoFarmMode == "Fast Rep" then
+                        setFastRepTime(key, tool)
+                    else
+                        restoreRepTime(key)
+                        local repTime = tool and tool:FindFirstChild("repTime", true)
+                        repDelay = math.max(0.15, tonumber(repTime and repTime.Value) or 1)
+                        local owned = LP:FindFirstChild("ownedGamepasses")
+                        if owned and owned:FindFirstChild("x2 Rep Time") then
+                            repDelay = repDelay * 0.5
+                        end
+                    end
+                end
+                local event = LP:FindFirstChild("muscleEvent")
+                if event then
+                    event:FireServer("rep")
+                end
+            end)
+            task.wait(repDelay)
+        end
+    end)
+end
+
+
+local function findProteinEgg()
+    for _, container in ipairs({
+        getCharacter(),
+        LP:FindFirstChild("Backpack"),
+    }) do
+        if container then
+            for _, egg in ipairs(container:GetChildren()) do
+                if egg:IsA("Tool") and table.find(CONFIG.AutoEgg.Names, egg.Name)
+                    and egg:GetAttribute("Used") ~= true then
+                    return egg
+                end
+            end
+        end
+    end
+    return nil
+end
+
+
+local function hasProteinEggBoost()
+    local boostTimers = LP:FindFirstChild("boostTimersFolder")
+    if not boostTimers then
+        return false
+    end
+    for _, name in ipairs(CONFIG.AutoEgg.Names) do
+        local timer = boostTimers:FindFirstChild(name)
+        if timer and timer:IsA("ValueBase") and tonumber(timer.Value) and timer.Value > 0 then
+            return true
+        end
+    end
+    return false
+end
+
+
+local function hubNotify(text, duration)
+    pcall(function()
+        local message = tostring(text or "")
+        if type(State.translateText) == "function" then message = State.translateText(message) end
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "DARKZS HUB",
+            Text = message,
+            Duration = tonumber(duration) or 4,
+        })
+    end)
+end
+
+
+local function countProteinEggs()
+    local total = 0
+    for _, container in ipairs({
+        getCharacter(),
+        LP:FindFirstChild("Backpack"),
+        LP:FindFirstChild("consumablesFolder"),
+    }) do
+        if container then
+            for _, egg in ipairs(container:GetChildren()) do
+                if (egg:IsA("Tool") or egg:IsA("StringValue"))
+                    and table.find(CONFIG.AutoEgg.Names, egg.Name) then
+                    total = total + 1
+                end
+            end
+        end
+    end
+    return total
+end
+
+State.eggBusy = false
+
+State.eatProteinEgg = function(force)
+    if not force and hasProteinEggBoost() then
+        return true
+    end
+    if State.eggBusy then
+        return false
+    end
+
+    local egg = findProteinEgg()
+    local character = getCharacter()
+    local muscleEvent = LP:FindFirstChild("muscleEvent")
+    if not egg or not character or not muscleEvent or not muscleEvent:IsA("RemoteEvent") then
+        return false
+    end
+
+    State.eggBusy = true
+    local ok, consumed = pcall(function()
+        local originalParent = egg.Parent
+        local originalUsed = egg:GetAttribute("Used")
+        local beforeCount = countProteinEggs()
+        local hadBoost = hasProteinEggBoost()
+
+        local function confirmed()
+            return not egg.Parent or countProteinEggs() < beforeCount
+                or (not hadBoost and hasProteinEggBoost())
+        end
+
+        if egg.Parent ~= character then
+            egg.Parent = character
+            task.wait(0.2)
+        end
+
+        if confirmed() then
+            return true
+        end
+
+        egg:SetAttribute("Used", true)
+        muscleEvent:FireServer("proteinEgg", egg)
+        local deadline = time() + 3
+        while time() < deadline do
+            if confirmed() then
+                return true
+            end
+            task.wait(0.1)
+        end
+
+        if egg.Parent then egg:SetAttribute("Used", originalUsed) end
+        if egg.Parent == character and originalParent and originalParent.Parent then
+            egg.Parent = originalParent
+        end
+        return false
+    end)
+    State.eggBusy = false
+    return ok and consumed == true
+end
+
+do
+
+local function parseBoostTime(text)
+    text = tostring(text or "")
+    local hours = tonumber(text:match("(%d+)%s*[hH]")) or 0
+    local minutes = tonumber(text:match("(%d+)%s*[mM]")) or 0
+    local seconds = tonumber(text:match("(%d+)%s*[sS]")) or 0
+    local total = hours * 3600 + minutes * 60 + seconds
+    return total > 0 and total or nil
+end
+
+
+local function visibleStrengthBoostRemaining()
+    local boostTimers = LP:FindFirstChild("boostTimersFolder")
+    if boostTimers then
+        for _, name in ipairs(CONFIG.AutoEgg.Names) do
+            local timer = boostTimers:FindFirstChild(name)
+            local remaining = timer and tonumber(timer.Value)
+            if remaining and remaining > 0 then
+                return remaining
+            end
+        end
+    end
+    return 0
+end
+
+State.autoEggSources = { manual = false, fastFarm = false, rebirth = false }
+State.autoEggNextAt = 0
+State.autoEggImmediateRequested = false
+
+State.setAutoEgg = function(enabled, source)
+    source = source or "manual"
+    local wasEnabled = State.autoEggSources[source] == true
+    State.autoEggSources[source] = enabled == true
+    if enabled == true and not wasEnabled then
+        State.autoEggImmediateRequested = true
+    end
+    local desired = false
+    for _, active in pairs(State.autoEggSources) do
+        if active then
+            desired = true
+            break
+        end
+    end
+    if State.autoEgg == desired then
+        return
+    end
+    State.autoEgg = desired
+    if not desired then
+        State.autoEggImmediateRequested = false
+        stopThread("autoEgg")
+        return
+    end
+    startThread("autoEgg", function()
+        while State.running and State.autoEgg do
+            local now = time()
+            if State.autoEggImmediateRequested then
+                State.autoEggImmediateRequested = false
+                if State.eatProteinEgg(false) then
+                    State.autoEggNextAt = now + CONFIG.AutoEgg.Interval
+                else
+                    State.autoEggNextAt = now + 10
+                end
+            else
+                local remaining = visibleStrengthBoostRemaining()
+                if remaining > 0 then
+                    State.autoEggNextAt = math.max(State.autoEggNextAt, now + remaining)
+                end
+                if now >= State.autoEggNextAt then
+                    if State.eatProteinEgg(false) then
+                        State.autoEggNextAt = now + CONFIG.AutoEgg.Interval
+                    else
+                        State.autoEggNextAt = now + 10
+                    end
+                end
+            end
+            task.wait(1)
+        end
+    end)
+end
+end
+
+
+local function findNativeAutoLiftButton()
+    local gameGui = PlayerGui:FindFirstChild("gameGui")
+    local modernHud = gameGui and gameGui:FindFirstChild("hudNewMenu")
+    local modernTop = modernHud and modernHud:FindFirstChild("Top")
+    local modernButton = modernTop and modernTop:FindFirstChild("AutoLiftBtn")
+    if modernButton and modernButton:IsA("GuiButton") then
+        return modernButton
+    end
+    local frame = PlayerGui:FindFirstChild("autoLiftFrame", true)
+    local button = frame and frame:FindFirstChild("autoLiftButton", true)
+    if button and button:IsA("GuiButton") then
+        return button
+    end
+    return nil
+end
+
+
+local function releaseNativeAutoLiftButton()
+    local native = State.autoLiftNative
+    if native.connection then
+        pcall(function()
+            native.connection:Disconnect()
+        end)
+        native.connection = nil
+    end
+    if native.visualConnection then
+        pcall(function() native.visualConnection:Disconnect() end)
+        native.visualConnection = nil
+    end
+    for _, connection in ipairs(native.disabledConnections) do
+        pcall(function()
+            connection:Enable()
+        end)
+    end
+    table.clear(native.disabledConnections)
+    if native.fallbackMarker then
+        pcall(function()
+            native.fallbackMarker:Destroy()
+        end)
+        native.fallbackMarker = nil
+    end
+    if State.autoLiftEditableImage then
+        pcall(function() State.autoLiftEditableImage:Destroy() end)
+        State.autoLiftEditableImage = nil
+    end
+    State.autoLiftEditableLoading = false
+    native.button = nil
+end
+
+
+State.refreshNativeAutoLiftVisual = function()
+    local button = State.autoLiftNative.button
+    if not button or not button.Parent or button.Name ~= "AutoLiftBtn" then return end
+    local enabled = LP:GetAttribute("AutoLiftEnabled") == true
+    local stateLabel = button:FindFirstChild("InfoLabel")
+    if stateLabel and stateLabel:IsA("TextLabel") then
+        stateLabel.Text = enabled and "ON" or "OFF"
+        stateLabel.TextColor3 = enabled and Color3.fromRGB(85, 255, 127) or Color3.fromRGB(255, 80, 80)
+        stateLabel.TextStrokeColor3 = enabled and Color3.fromRGB(0, 85, 0) or Color3.fromRGB(85, 0, 0)
+    end
+    if button:IsA("ImageButton") then
+        button.ImageColor3 = Color3.new(1, 1, 1)
+        if not enabled then
+            button.Image = "rbxassetid://129249781616384"
+            return
+        end
+        local editable = State.autoLiftEditableImage
+        local usable = editable and pcall(function() return editable.Size.X > 0 end)
+        if not usable and not State.autoLiftEditableLoading then
+            State.autoLiftEditableLoading = true
+            local created, result = pcall(function()
+                local image = game:GetService("AssetService"):CreateEditableImageAsync(
+                    Content.fromUri("rbxassetid://129249781616384")
+                )
+                local size = image.Size
+                local pixels = image:ReadPixelsBuffer(Vector2.zero, size)
+                for index = 0, size.X * size.Y - 1 do
+                    local offset = index * 4
+                    local red = buffer.readu8(pixels, offset)
+                    local green = buffer.readu8(pixels, offset + 1)
+                    local blue = buffer.readu8(pixels, offset + 2)
+                    local alpha = buffer.readu8(pixels, offset + 3)
+                    if alpha > 0 and red > 45 and red > green * 1.35 and red > blue * 1.18 then
+                        buffer.writeu8(pixels, offset, math.floor(red * 0.1))
+                        buffer.writeu8(pixels, offset + 1, red)
+                        buffer.writeu8(pixels, offset + 2, math.floor(red * 0.33))
+                    end
+                end
+                image:WritePixelsBuffer(Vector2.zero, size, pixels)
+                return image
+            end)
+            State.autoLiftEditableLoading = false
+            if created and result then
+                State.autoLiftEditableImage = result
+                State.autoLiftEditableError = nil
+                editable = result
+            else
+                State.autoLiftEditableError = tostring(result)
+            end
+        end
+        if editable then
+            local applied = pcall(function()
+                button.ImageContent = Content.fromObject(editable)
+            end)
+            if applied then return end
+        end
+        button.Image = "rbxassetid://129249781616384"
+    end
+end
+
+
+local function bindNativeAutoLiftButton()
+    local button = findNativeAutoLiftButton()
+    if not button then
+        return false
+    end
+    local native = State.autoLiftNative
+    if native.button == button and native.connection and native.connection.Connected then
+        return true
+    end
+    releaseNativeAutoLiftButton()
+    native.button = button
+    button.Active = true
+    button.Selectable = true
+
+    local isolated = false
+    if type(getconnections) == "function" then
+        for _, signal in ipairs({
+            button.Activated,
+            button.MouseButton1Click,
+            button.MouseButton1Down,
+            button.MouseButton1Up,
+        }) do
+            local ok, connections = pcall(getconnections, signal)
+            if ok and type(connections) == "table" then
+                for _, connection in ipairs(connections) do
+                    local disabled = pcall(function()
+                        connection:Disable()
+                    end)
+                    if disabled then
+                        table.insert(native.disabledConnections, connection)
+                        isolated = true
+                    end
+                end
+            end
+        end
+    end
+
+    local owned = LP:FindFirstChild("ownedGamepasses")
+    if owned and not owned:FindFirstChild("Auto Lift") then
+        local marker = Instance.new("BoolValue")
+        marker.Name = "Auto Lift"
+        marker.Value = true
+        marker:SetAttribute("Temp", not isolated)
+        marker.Parent = owned
+        native.fallbackMarker = marker
+    end
+
+    native.connection = button.Activated:Connect(function()
+        if not State.running or not State.autoLiftUnlocked then
+            return
+        end
+        LP:SetAttribute("AutoLiftEnabled", LP:GetAttribute("AutoLiftEnabled") ~= true)
+    end)
+    native.visualConnection = LP:GetAttributeChangedSignal("AutoLiftEnabled"):Connect(function()
+        task.defer(State.refreshNativeAutoLiftVisual)
+    end)
+    State.refreshNativeAutoLiftVisual()
+    return true
+end
+
+
+local function unlockNativeAutoLift()
+    if State.autoLiftUnlocked then
+        local bound = bindNativeAutoLiftButton()
+        if bound then LP:SetAttribute("AutoLiftEnabled", true); task.defer(State.refreshNativeAutoLiftVisual) end
+        return bound
+    end
+    if not bindNativeAutoLiftButton() then
+        return false
+    end
+    State.autoLiftUnlocked = true
+    LP:SetAttribute("AutoLiftEnabled", true)
+    task.defer(State.refreshNativeAutoLiftVisual)
+    return true
+end
+
+local hiddenFrames = setmetatable({}, { __mode = "k" })
+local hideFramesConnections = {}
+local hiddenDurabilityFrames = setmetatable({}, { __mode = "k" })
+local durabilityFrameConnections = {}
+local trainingFrameNames = {
+    strengthframe = true,
+    durabilityframe = true,
+    agilityframe = true,
+    fuerzaframe = true,
+}
+
+
+local function releaseHiddenObjects(objects)
+    for object, entry in pairs(objects) do
+        if entry.visibleConnection then
+            entry.visibleConnection:Disconnect()
+        end
+        if entry.ancestryConnection then
+            entry.ancestryConnection:Disconnect()
+        end
+        if object and object.Parent then
+            pcall(function()
+                object.Visible = entry.visible
+            end)
+        end
+    end
+    table.clear(objects)
+end
+
+
+local function keepObjectHidden(objects, object, isEnabled)
+    if objects[object] ~= nil then
+        return
+    end
+    local entry = { visible = object.Visible }
+    objects[object] = entry
+    entry.visibleConnection = object:GetPropertyChangedSignal("Visible"):Connect(function()
+        if isEnabled() and object.Parent and object.Visible then
+            object.Visible = false
+        end
+    end)
+    entry.ancestryConnection = object.AncestryChanged:Connect(function(_, parent)
+        if parent == nil then
+            if entry.visibleConnection then
+                entry.visibleConnection:Disconnect()
+            end
+            if entry.ancestryConnection then
+                entry.ancestryConnection:Disconnect()
+            end
+            objects[object] = nil
+        end
+    end)
+    object.Visible = false
+end
+
+
+local function hideDurabilityFrame(object)
+    if object
+        and object:IsA("GuiObject")
+        and object.Name == "durabilityFrame"
+        and hiddenDurabilityFrames[object] == nil then
+        keepObjectHidden(hiddenDurabilityFrames, object, function()
+            return State.running and State.hideDurability
+        end)
+    end
+end
+
+
+local function setHideDurability(enabled)
+    State.hideDurability = enabled == true
+    for _, connection in ipairs(durabilityFrameConnections) do
+        connection:Disconnect()
+    end
+    table.clear(durabilityFrameConnections)
+
+    if State.hideDurability then
+        for _, object in ipairs(ReplicatedStorage:GetChildren()) do
+            pcall(hideDurabilityFrame, object)
+        end
+        for _, object in ipairs(PlayerGui:GetDescendants()) do
+            pcall(hideDurabilityFrame, object)
+        end
+        durabilityFrameConnections[#durabilityFrameConnections + 1] = ReplicatedStorage.ChildAdded:Connect(function(object)
+            if State.hideDurability then
+                task.defer(hideDurabilityFrame, object)
+            end
+        end)
+        durabilityFrameConnections[#durabilityFrameConnections + 1] = PlayerGui.DescendantAdded:Connect(function(object)
+            if State.hideDurability then
+                task.defer(hideDurabilityFrame, object)
+            end
+        end)
+    else
+        releaseHiddenObjects(hiddenDurabilityFrames)
+    end
+end
+
+do
+    local durabilityBurstConnection = nil
+    local durabilityBurstGeneration = 0
+    local durabilityBurstLastAt = 0
+    local durabilityBurstEchoing = false
+
+
+    local function stopDurabilityBurst()
+        durabilityBurstGeneration = durabilityBurstGeneration + 1
+        if durabilityBurstConnection then
+            durabilityBurstConnection:Disconnect()
+            durabilityBurstConnection = nil
+        end
+    end
+
+
+    local function startDurabilityBurst()
+        stopDurabilityBurst()
+        if type(firesignal) ~= "function" then
+            return
+        end
+        local muscleEvent = LP:FindFirstChild("muscleEvent")
+        if not muscleEvent or not muscleEvent:IsA("RemoteEvent") then
+            return
+        end
+        local generation = durabilityBurstGeneration
+        durabilityBurstConnection = muscleEvent.OnClientEvent:Connect(function(kind, amount)
+            local controller = activeRockFarm
+            local selectedRock = State.selectedRock
+            local rockGeneration = State.rockGeneration
+            if durabilityBurstEchoing
+                or kind ~= "showDurability"
+                or amount == nil
+                or not State.running
+                or not State.fastPunch
+                or not selectedRock
+                or not controller
+                or not controller.enabled
+                or controller.definition ~= selectedRock
+                or not controller.lastRock
+                or realNow() < (State.rockVisualReadyAt or math.huge) then
+                return
+            end
+            if State.hideDurability then
+                return
+            end
+            local now = time()
+            if now - durabilityBurstLastAt < 0.28 then
+                return
+            end
+            durabilityBurstLastAt = now
+            for _, delay in ipairs({ 0.10, 0.24 }) do
+                task.delay(delay, function()
+                    if generation ~= durabilityBurstGeneration
+                        or not State.running
+                        or not State.fastPunch
+                        or State.rockGeneration ~= rockGeneration
+                        or State.selectedRock ~= selectedRock
+                        or activeRockFarm ~= controller
+                        or not controller.enabled
+                        or State.hideDurability then
+                        return
+                    end
+                    durabilityBurstEchoing = true
+                    pcall(firesignal, muscleEvent.OnClientEvent, "showDurability", amount)
+                    durabilityBurstEchoing = false
+                end)
+            end
+        end)
+    end
+
+    State.stopDurabilityBurst = stopDurabilityBurst
+    startDurabilityBurst()
+end
+
+
+local function getTrainingUiAssets()
+    local shared = ReplicatedStorage:FindFirstChild("shared")
+    local assets = shared and shared:FindFirstChild("assets")
+    return assets and assets:FindFirstChild("ui") or nil
+end
+
+
+local function hideFrame(object, expectedParent)
+    if State.hideFrames
+        and object
+        and object.Parent == expectedParent
+        and object:IsA("GuiObject")
+        and trainingFrameNames[tostring(object.Name or ""):lower()]
+        and hiddenFrames[object] == nil then
+        keepObjectHidden(hiddenFrames, object, function()
+            return State.running and State.hideFrames
+        end)
+    end
+end
+
+
+local function setHideFrames(enabled)
+    State.hideFrames = enabled == true
+    local showPopups = not State.hideFrames
+    local changedPreference = LP:GetAttribute("ShowPopups") ~= showPopups
+    pcall(LP.SetAttribute, LP, "ShowPopups", showPopups)
+    if changedPreference and not State.shuttingDown then
+        local events = ReplicatedStorage:FindFirstChild("rEvents")
+        local remote = events and events:FindFirstChild("savePlayerSizeEvent")
+        if remote and remote:IsA("RemoteEvent") then
+            pcall(remote.FireServer, remote, "showPopupsOption")
+        end
+    end
+    for _, connection in ipairs(hideFramesConnections) do
+        connection:Disconnect()
+    end
+    table.clear(hideFramesConnections)
+
+    if State.hideFrames then
+        local watchedRoots = {}
+
+        local function watchRoot(root)
+            if not root or watchedRoots[root] then
+                return
+            end
+            watchedRoots[root] = true
+            for _, object in ipairs(root:GetChildren()) do
+                pcall(hideFrame, object, root)
+            end
+            hideFramesConnections[#hideFramesConnections + 1] = root.ChildAdded:Connect(function(object)
+                if State.running and State.hideFrames then
+                    task.defer(hideFrame, object, root)
+                end
+            end)
+        end
+
+        watchRoot(getTrainingUiAssets())
+        watchRoot(PlayerGui:FindFirstChild("statEffectsGui"))
+        hideFramesConnections[#hideFramesConnections + 1] = PlayerGui.ChildAdded:Connect(function(object)
+            if State.running and State.hideFrames and object.Name == "statEffectsGui" then
+                task.defer(watchRoot, object)
+            end
+        end)
+    else
+        releaseHiddenObjects(hiddenFrames)
+    end
+end
+
+local machineGeneration = 0
+local machineFunctions = nil
+FastFarm.MachineVisuals = {
+    humanoid = nil,
+    tracks = {},
+    activeType = nil,
+    activeMachine = nil,
+}
+
+do
+local machineVisuals = FastFarm.MachineVisuals
+
+local function stopMachineAnimations(fadeTime)
+    for _, bundle in pairs(machineVisuals.tracks) do
+        for _, animationTrack in pairs(bundle) do
+            if animationTrack and animationTrack.IsPlaying then
